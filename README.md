@@ -7,17 +7,15 @@ You watch the video and write down where each clip should **end**. clipper does 
 
 ## The website (easiest)
 
-Open the site on your phone and paste a link, then optionally the end time of each clip. The server
-downloads the video and **keeps it**, so you can make more clips from it later without downloading it
-again. You download only the finished clips, at full quality (H.264, CRF 18).
+1. Paste a link and tap **Get video**. The server downloads the video and keeps it. You can close the page; it carries on.
+2. Type the **start** and **end** of the part you want, or watch the small preview and tap *Start here* / *End here*.
+   Leave the end empty to clip to the end of the video.
+3. Tap **Make 9:16 clip**, then **Download**. Clips are 1080x1920 and follow the faces.
+4. For the next part, the start is already filled in with where the last clip ended. The bar shows how much
+   of the video you've clipped. When it's all done, delete the video from the server.
 
-- **Save a video for later.** Paste the link and leave the times empty.
-- **Find your times.** Tap *Make clips* on a saved video, then *Watch small preview*. The preview is a
-  360p copy of a few MB. Tap *Clip ends here* at each point you want a cut.
-- **Choose the shape.** *Vertical 9:16, follows faces* or *Original shape* (the source frame, uncropped).
-- **Download.** Each clip has its own button, or use *Download all (.zip)*. You can also download the
-  whole saved video.
-- **Resumes after a restart.** If the server restarts, anything unfinished carries on.
+Pasting the same link again opens the saved copy, so nothing downloads twice. Clip downloads go to the
+phone's own download manager, so they keep going in the background and resume if the connection drops.
 
 On a server:
 
@@ -27,11 +25,8 @@ cd clipper
 ./setup.sh
 ```
 
-It prints the address (`http://<server IP>:4880`) and the password. The password is kept in
-`~/clipper-data/password`, or you can set it yourself with `CLIPPER_PASSWORD`. Videos and clips live in
-`~/clipper-data`. You can delete them from the site.
-
-To run it by hand: `clipper web --host 0.0.0.0 --port 4880 --data ~/clipper-data`.
+It prints the address (`http://<server IP>:4880`). There is no password, so anyone with the address can use it.
+Videos and clips live in `~/clipper-data`. To run it by hand: `clipper web --host 0.0.0.0 --port 4880`.
 
 ## Straight to a phone folder (Syncthing)
 

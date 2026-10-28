@@ -92,11 +92,9 @@ UNIT
     if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
         sudo ufw allow 4880/tcp comment clipper
     fi
-    for _ in $(seq 30); do [ -s "$HOME/clipper-data/password" ] && break; sleep 1; done
     IP=$(curl -fsS -4 https://ifconfig.me 2>/dev/null || hostname -I | cut -d' ' -f1)
     echo
     echo "All set. On your phone open:   http://$IP:4880"
-    echo "Password:                      $(cat "$HOME/clipper-data/password")"
     echo "(If it doesn't open, allow TCP port 4880 in your cloud provider's firewall.)"
     exit 0
 fi

@@ -1,21 +1,18 @@
-"""The clipper website: save videos on the server once, make clips from them, download the clips.
+"""The clipper website: paste a link, the server downloads and keeps the video, then make one
+9:16 clip at a time from a start and an end time until the whole video is clipped.
 
-Videos are downloaded by the server and kept in its library, so the phone's data is only spent on
-the finished clips (and, if wanted, a small 360p preview for finding the cut times).
-One worker thread does the heavy work in order: downloads, previews and clips.
+Everything heavy runs on the server in one worker thread, so closing the page never stops it.
+Clip downloads are plain files with a size and Range support, so the phone's download manager
+keeps going in the background and resumes.
 """
 from __future__ import annotations
 
 import argparse
-import hashlib
-import hmac
 import ipaddress
 import json
 import mimetypes
-import os
 import queue
 import re
-import secrets
 import shutil
 import socket
 import subprocess
@@ -23,21 +20,18 @@ import sys
 import threading
 import time
 import uuid
-import zipfile
-from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, quote, urlparse
+from urllib.parse import quote, urlparse
 
 from . import media
 from .cli import run
 from .faces import make_detector
-from .times import END, ClipperError, format_time, parse_time, parse_times_text
-from .web_page import LOGIN_PAGE, PAGE
+from .times import END, ClipperError, format_time, parse_time
+from .web_page import PAGE
 
-QUALITIES = {"1080": 1080, "best": 2160}
+MAX_HEIGHT = 1440               # sharper 9:16 crops than 1080p, still quick to download and decode
 MIN_FREE_BYTES = 5 * 10**9      # never let downloads fill the disk the other sites live on
-COOKIE = "clipper"
 
 
 class Store:
@@ -62,8 +56,9 @@ class Store:
 
     def update(self, kind: str, key: str, **fields) -> None:
         with self.lock:
-            self.state[kind][key].update(fields)
-            self.save()
+            if key in self.state[kind]:
+                self.state[kind][key].update(fields)
+                self.save()
 
     def snapshot(self) -> dict:
         with self.lock:
@@ -122,9 +117,9 @@ class Worker:
         free = shutil.disk_usage(store.data).free
         if free < MIN_FREE_BYTES + 10**9:
             raise ClipperError(f"The server is nearly full ({free / 1e9:.1f} GB free). "
-                               "Delete some saved videos or clips first.")
+                               "Delete a video you've finished with first.")
         store.update("videos", vid, status="downloading", message="")
-        path, title = media.download(v["url"], store.library, QUALITIES.get(v["quality"], 1080), media.say,
+        path, title = media.download(v["url"], store.library, MAX_HEIGHT, media.say,
                                      max_bytes=free - MIN_FREE_BYTES)
         info = media.probe(path)
         store.update("videos", vid, status="preview", title=title, file=path.name, duration=info.duration,
@@ -154,16 +149,17 @@ class Worker:
         if v["status"] != "ready":
             raise ClipperError(f"The video isn't saved yet: {v.get('message') or v['status']}")
         store.update("jobs", jid, status="working", message="")
-        if self.detector is None and j["shape"] == "vertical":
+        if self.detector is None:
             self.detector = make_detector(self.detector_name, media.say)
-        manifest = run(str(store.library / v["file"]), j["ends"], j["start"], out_root=store.clips / jid,
-                       detector=self.detector or self.detector_name, preset=self.preset, crf=18,
-                       reframe=j["shape"] == "vertical", title=v["title"])
-        folder = store.clips / jid / media.safe_name(manifest["title"])
-        clips = [{"file": p["file"], "start": p["start"], "end": p["end"], "duration": p["duration"],
-                  "size": (folder / p["file"]).stat().st_size} for p in manifest["parts"]]
-        store.update("jobs", jid, status="done", progress="", clips=clips, folder=folder.name,
-                     width=manifest["width"], height=manifest["height"])
+        work = store.clips / jid
+        manifest = run(str(store.library / v["file"]), [j["end"]], j["start"], out_root=work,
+                       detector=self.detector, preset=self.preset, crf=18, title=v["title"])
+        made = work / media.safe_name(v["title"]) / manifest["parts"][0]["file"]
+        name = f"{media.safe_name(v['title'])}_part{j['part']:02d}.mp4"
+        made.replace(work / name)
+        shutil.rmtree(made.parent, ignore_errors=True)
+        store.update("jobs", jid, status="done", progress="", file=name, size=(work / name).stat().st_size,
+                     end=manifest["parts"][0]["end_seconds"])
 
 
 def check_public(url: str) -> None:
@@ -178,28 +174,19 @@ def check_public(url: str) -> None:
             raise ClipperError("That link points inside the server. Use a public video link.")
 
 
-_zip_lock = threading.Lock()
-
-
-def make_zip(store: Store, jid: str, job: dict) -> Path:
-    """All of a job's clips in one .zip on disk, so it downloads with a size and can resume."""
-    folder = store.clips / jid / job["folder"]
-    target = store.clips / jid / f"{job['folder']}.zip"
-    with _zip_lock:
-        if not target.exists():
-            part = target.with_suffix(".partial")
-            with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-                for c in job["clips"]:
-                    z.write(folder / c["file"], c["file"])
-            part.replace(target)
-    return target
+def read_time(text, what: str):
+    text = str(text or "").strip()
+    if not text:
+        return None
+    try:
+        return parse_time(text)
+    except ClipperError as e:
+        raise ClipperError(f"{what}: {e}") from None
 
 
 # ---------------------------------------------------------------- the website
 
-def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
-    token = hmac.new(secret, password.encode(), hashlib.sha256).hexdigest()
-    failures: dict[str, list[float]] = {}
+def make_handler(store: Store, worker: Worker):
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "clipper"
@@ -207,19 +194,12 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
         def log_message(self, fmt, *args):  # quiet: only errors go to the journal
             pass
 
-        # -------- helpers
-        def signed_in(self) -> bool:
-            cookie = SimpleCookie(self.headers.get("Cookie", ""))
-            return COOKIE in cookie and hmac.compare_digest(cookie[COOKIE].value, token)
-
-        def send(self, code: int, body: bytes | str, kind: str = "text/html; charset=utf-8", headers=None):
+        def send(self, code: int, body: bytes | str, kind: str = "text/html; charset=utf-8"):
             body = body.encode() if isinstance(body, str) else body
             self.send_response(code)
             self.send_header("Content-Type", kind)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
-            for k, v in (headers or {}).items():
-                self.send_header(k, v)
             self.end_headers()
             if self.command != "HEAD":
                 self.wfile.write(body)
@@ -229,15 +209,6 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
 
         def error(self, message: str, code: int = 400):
             self.json({"error": message}, code)
-
-        def body(self) -> dict:
-            length = int(self.headers.get("Content-Length") or 0)
-            if length > 100_000:
-                raise ClipperError("Too much text.")
-            raw = self.rfile.read(length).decode("utf-8", "replace")
-            if self.headers.get("Content-Type", "").startswith("application/json"):
-                return json.loads(raw or "{}")
-            return {k: v[0] for k, v in parse_qs(raw).items()}
 
         def send_file(self, path: Path, name: str, attachment: bool):
             if not path.is_file():
@@ -277,160 +248,125 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                     self.wfile.write(chunk)
                     left -= len(chunk)
 
-        # -------- routes
         def do_HEAD(self):
             self.do_GET()
 
         def do_GET(self):
-            url = urlparse(self.path)
-            if url.path == "/health":
+            path = urlparse(self.path).path
+            if path == "/health":
                 return self.send(200, "ok", "text/plain")
-            if not self.signed_in():
-                if url.path.startswith(("/api/", "/media/")):
-                    return self.error("Please sign in again.", 401)
-                return self.send(200, LOGIN_PAGE)
-            if url.path == "/":
+            if path == "/":
                 return self.send(200, PAGE)
-            if url.path == "/api/state":
+            if path == "/api/state":
                 state = store.snapshot()
                 state["free_gb"] = round(shutil.disk_usage(store.data).free / 1e9, 1)
-                state["queue"] = worker.tasks.qsize()
                 return self.json(state)
-            parts = url.path.strip("/").split("/")
+            parts = path.strip("/").split("/")
             try:
                 if parts[:2] == ["media", "preview"] and len(parts) == 3:
                     vid = parts[2].removesuffix(".mp4")
                     if vid in store.state["videos"]:
                         return self.send_file(store.previews / f"{vid}.mp4", f"{vid}.mp4", False)
-                if parts[:2] == ["media", "video"] and len(parts) == 3:
-                    v = store.state["videos"].get(parts[2])
-                    if v and v.get("file"):
-                        return self.send_file(store.library / v["file"],
-                                              f"{media.safe_name(v['title'])}.mp4", True)
-                if parts[:2] == ["media", "clip"] and len(parts) == 4:
+                if parts[:2] == ["media", "clip"] and len(parts) == 3:
                     j = store.state["jobs"].get(parts[2])
-                    if j and any(c["file"] == parts[3] for c in j.get("clips", [])):
-                        return self.send_file(store.clips / parts[2] / j["folder"] / parts[3], parts[3], True)
-                if parts[:2] == ["media", "zip"] and len(parts) == 3:
-                    j = store.state["jobs"].get(parts[2])
-                    if j and j.get("clips"):
-                        return self.send_file(make_zip(store, parts[2], j), f"{j['folder']}.zip", True)
+                    if j and j.get("file"):
+                        return self.send_file(store.clips / parts[2] / j["file"], j["file"], True)
             except (BrokenPipeError, ConnectionResetError):
                 return
             self.error("Not found.", 404)
 
         def do_POST(self):
-            url = urlparse(self.path)
-            try:
-                data = self.body()
-            except (ValueError, ClipperError):
-                return self.error("That request didn't make sense.")
-            if url.path == "/login":
-                ip = self.headers.get("CF-Connecting-IP") or self.headers.get("X-Forwarded-For") \
-                    or self.client_address[0]
-                recent = [t for t in failures.get(ip, []) if time.time() - t < 600]
-                if len(recent) >= 10:
-                    return self.send(429, LOGIN_PAGE.replace("<!--msg-->", "Too many tries. Wait 10 minutes."))
-                if hmac.compare_digest(str(data.get("password", "")), password):
-                    failures.pop(ip, None)
-                    self.send_response(303)
-                    self.send_header("Location", "/")
-                    self.send_header("Set-Cookie", f"{COOKIE}={token}; Path=/; Max-Age=31536000; HttpOnly; "
-                                                   "SameSite=Lax" + ("; Secure" if self.headers.get(
-                                                       "X-Forwarded-Proto") == "https" else ""))
-                    self.send_header("Content-Length", "0")
-                    self.end_headers()
-                    return
-                if len(failures) > 1000:
-                    failures.clear()
-                failures[ip] = recent + [time.time()]
-                time.sleep(1)
-                return self.send(401, LOGIN_PAGE.replace("<!--msg-->", "Wrong password."))
-            if not self.signed_in():
-                return self.error("Please sign in again.", 401)
+            path = urlparse(self.path).path
             if not self.headers.get("Content-Type", "").startswith("application/json"):
                 return self.error("Send JSON.", 415)     # a form on another site can't send JSON
             try:
-                if url.path == "/api/add":
-                    return self.json(self.add(data))
-                m = re.fullmatch(r"/api/(videos|jobs)/([\w-]+)/delete", url.path)
+                length = int(self.headers.get("Content-Length") or 0)
+                if length > 100_000:
+                    raise ValueError
+                data = json.loads(self.rfile.read(length) or b"{}")
+                if not isinstance(data, dict):
+                    raise ValueError
+            except ValueError:
+                return self.error("That request didn't make sense.")
+            try:
+                if path == "/api/video":
+                    return self.json(self.add_video(data))
+                if path == "/api/clip":
+                    return self.json(self.add_clip(data))
+                m = re.fullmatch(r"/api/(videos|jobs)/([\w-]+)/delete", path)
                 if m:
                     return self.json(self.delete(m.group(1), m.group(2)))
-                m = re.fullmatch(r"/api/jobs/([\w-]+)/retry", url.path)
-                if m and m.group(1) in store.state["jobs"]:
-                    if store.state["jobs"][m.group(1)]["status"] != "failed":
-                        raise ClipperError("Only clips that failed can be tried again.")
-                    store.update("jobs", m.group(1), status="waiting", message="", progress="")
-                    worker.tasks.put(("job", m.group(1)))
-                    return self.json({"ok": True})
-                m = re.fullmatch(r"/api/videos/([\w-]+)/retry", url.path)
-                if m and m.group(1) in store.state["videos"]:
-                    if store.state["videos"][m.group(1)]["status"] != "failed":
-                        raise ClipperError("Only videos that failed can be tried again.")
-                    store.update("videos", m.group(1), status="waiting", message="", progress="")
-                    worker.tasks.put(("video", m.group(1)))
+                m = re.fullmatch(r"/api/(videos|jobs)/([\w-]+)/retry", path)
+                if m and m.group(2) in store.state[m.group(1)]:
+                    if store.state[m.group(1)][m.group(2)]["status"] != "failed":
+                        raise ClipperError("Only things that failed can be tried again.")
+                    store.update(m.group(1), m.group(2), status="waiting", message="", progress="")
+                    worker.tasks.put(("video" if m.group(1) == "videos" else "job", m.group(2)))
                     return self.json({"ok": True})
             except ClipperError as e:
                 return self.error(str(e))
             self.error("Not found.", 404)
 
-        def add(self, data: dict) -> dict:
-            """A link and/or a saved video, plus optional end times. No times = just save the video."""
-            text = str(data.get("times") or "").strip()
-            ends = parse_times_text(text) if text else None
-            start = 0.0
-            if str(data.get("start") or "").strip():
-                start = parse_time(str(data["start"]))
-                if start == END:
-                    raise ClipperError('The start can\'t be "end".')
-            shape = "original" if data.get("shape") == "original" else "vertical"
-            vid = str(data.get("video") or "")
+        def add_video(self, data: dict) -> dict:
+            link = re.search(r"https?://\S+", str(data.get("url") or ""))
+            if not link:
+                raise ClipperError("Paste a video link (it starts with https://).")
+            url = link.group(0)
+            check_public(url)
             with store.lock:
                 videos = store.state["videos"]
-                if not vid:
-                    link = re.search(r"https?://\S+", str(data.get("url") or ""))
-                    if not link:
-                        raise ClipperError("Paste a video link (it starts with https://).")
-                    url = link.group(0)
-                    check_public(url)
-                    quality = "best" if data.get("quality") == "best" else "1080"
-                    vid = next((k for k, v in videos.items() if v["url"] == url and v["status"] != "failed"),
-                               None)
-                    if vid is None:
-                        vid = uuid.uuid4().hex[:10]
-                        videos[vid] = {"url": url, "title": url, "quality": quality, "status": "waiting",
-                                       "progress": "", "message": "", "added": time.time()}
-                        store.save()
-                        worker.tasks.put(("video", vid))
-                elif vid not in videos:
-                    raise ClipperError("That video isn't in the library any more.")
-                v = videos[vid]
-                if ends and v.get("duration"):
-                    last = [e for e in ends if e != END]
-                    if last and max(last) > v["duration"] + 0.05:
-                        raise ClipperError(f"{format_time(max(last))} is past the end of the video "
-                                           f"({format_time(v['duration'])}). Use \"end\" for the last clip.")
-                jid = None
-                if ends:
-                    jid = uuid.uuid4().hex[:10]
-                    store.state["jobs"][jid] = {"video": vid, "ends": ends, "start": start, "times": text,
-                                                "shape": shape, "status": "waiting", "progress": "",
-                                                "message": "", "clips": [], "created": time.time()}
+                vid = next((k for k, v in videos.items() if v["url"] == url and v["status"] != "failed"), None)
+                if vid is None:          # the same link again opens the saved copy: no second download
+                    vid = uuid.uuid4().hex[:10]
+                    videos[vid] = {"url": url, "title": url, "status": "waiting", "progress": "",
+                                   "message": "", "added": time.time()}
                     store.save()
-                    worker.tasks.put(("job", jid))
-            return {"video": vid, "job": jid}
+                    worker.tasks.put(("video", vid))
+            return {"video": vid}
+
+        def add_clip(self, data: dict) -> dict:
+            vid = str(data.get("video") or "")
+            with store.lock:
+                v = store.state["videos"].get(vid)
+                if not v:
+                    raise ClipperError("That video isn't saved any more. Paste the link again.")
+                if v["status"] != "ready":
+                    raise ClipperError("Wait for the video to finish downloading.")
+                start = read_time(data.get("start"), "Start")
+                start = 0.0 if start is None else start
+                end = read_time(data.get("end"), "End")
+                end = END if end is None else end
+                if start == END:
+                    raise ClipperError('The start can\'t be "end".')
+                if start >= v["duration"]:
+                    raise ClipperError(f"The start is past the end of the video ({format_time(v['duration'])}).")
+                if end != END:
+                    if end <= start:
+                        raise ClipperError("The end must be after the start.")
+                    if end > v["duration"] + 0.05:
+                        raise ClipperError(f"The end is past the end of the video ({format_time(v['duration'])}). "
+                                           "Leave it empty to clip to the end.")
+                part = 1 + sum(1 for j in store.state["jobs"].values() if j["video"] == vid)
+                jid = uuid.uuid4().hex[:10]
+                store.state["jobs"][jid] = {"video": vid, "start": start,
+                                            "end": v["duration"] if end == END else end, "part": part,
+                                            "status": "waiting", "progress": "", "message": "",
+                                            "created": time.time()}
+                store.save()
+                worker.tasks.put(("job", jid))
+            return {"job": jid}
 
         def delete(self, kind: str, key: str) -> dict:
             with store.lock:
                 item = store.state[kind].get(key)
                 if not item:
                     return {"ok": True}
-                busy = worker.current == ("video" if kind == "videos" else "job", key)
-                if busy or (kind == "videos" and any(
-                        j["video"] == key and j["status"] in ("waiting", "working")
-                        for j in store.state["jobs"].values())):
+                if worker.current == ("video" if kind == "videos" else "job", key):
                     raise ClipperError("It's being worked on. Delete it when it's finished.")
                 if kind == "videos":
+                    if any(j["video"] == key and j["status"] in ("waiting", "working")
+                           for j in store.state["jobs"].values()):
+                        raise ClipperError("A clip of this video is being made. Delete it when that's done.")
                     if item.get("file"):
                         (store.library / item["file"]).unlink(missing_ok=True)
                         index_file = store.library / "index.json"
@@ -439,6 +375,9 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                             index.pop(item["url"], None)
                             index_file.write_text(json.dumps(index, indent=2, ensure_ascii=False))
                     (store.previews / f"{key}.mp4").unlink(missing_ok=True)
+                    for jid in [j for j, job in store.state["jobs"].items() if job["video"] == key]:
+                        shutil.rmtree(store.clips / jid, ignore_errors=True)
+                        del store.state["jobs"][jid]
                 else:
                     shutil.rmtree(store.clips / key, ignore_errors=True)
                 del store.state[kind][key]
@@ -448,16 +387,11 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
     return Handler
 
 
-def serve(data: Path, host: str, port: int, password: str, detector: str = "auto",
-          preset: str = "faster") -> ThreadingHTTPServer:
+def serve(data: Path, host: str, port: int, detector="auto", preset: str = "faster") -> ThreadingHTTPServer:
     data.mkdir(parents=True, exist_ok=True)
-    secret_file = data / "secret"
-    if not secret_file.exists():
-        secret_file.write_bytes(secrets.token_bytes(32))
-        os.chmod(secret_file, 0o600)
     store = Store(data)
     worker = Worker(store, detector, preset)
-    server = ThreadingHTTPServer((host, port), make_handler(store, worker, password, secret_file.read_bytes()))
+    server = ThreadingHTTPServer((host, port), make_handler(store, worker))
     server.daemon_threads = True
     return server
 
@@ -471,23 +405,13 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--preset", default="faster",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"])
     args = parser.parse_args(argv)
-    data = Path(args.data).expanduser()
-    password = os.environ.get("CLIPPER_PASSWORD", "")
-    if not password:
-        file = data / "password"
-        if not file.exists():
-            data.mkdir(parents=True, exist_ok=True)
-            file.write_text(secrets.token_urlsafe(9) + "\n")
-            os.chmod(file, 0o600)
-        password = file.read_text().strip()
     try:
         media.require_tools()
     except ClipperError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
-    server = serve(data, args.host, args.port, password, args.detector, args.preset)
-    print(f"clipper website on http://{args.host}:{args.port}  (password in {data / 'password'} "
-          f"or $CLIPPER_PASSWORD)", flush=True)
+    server = serve(Path(args.data).expanduser(), args.host, args.port, args.detector, args.preset)
+    print(f"clipper website on http://{args.host}:{args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

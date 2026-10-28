@@ -1,4 +1,4 @@
-"""clipper: long anime video + list of end times -> vertical 1080x1920 clips."""
+"""clipper: long anime video + list of end times -> clips (9:16, 4:5, 1:1 or original) that follow the face."""
 from __future__ import annotations
 
 import argparse
@@ -19,7 +19,10 @@ from .track import Settings, analyse
 def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clips"),
         downloads: Path = Path("downloads"), max_height: int = 1080, force: bool = False,
         detector: Detector | str = "auto", settings: Settings = Settings(), preset: str = "faster",
-        crf: int = 20, reframe: bool = True, title: str | None = None) -> dict:
+        crf: int = 20, shape: str = "9:16", title: str | None = None) -> dict:
+    """shape: "9:16", "4:5" or "1:1" (cropped around faces), or "original" (the source frame)."""
+    if shape != "original" and shape not in media.SHAPES:
+        raise ClipperError(f'Unknown shape "{shape}". Use one of: original, {", ".join(media.SHAPES)}.')
     media.require_tools()
     if media.is_url(source):
         video, title = media.download(source, downloads, max_height, say)
@@ -41,18 +44,21 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
             old = {p["part"]: p for p in json.loads(manifest_file.read_text())["parts"]}
         except (ValueError, KeyError):
             old = {}
-    size = (media.OUT_W, media.OUT_H) if reframe else (info.width // 2 * 2, info.height // 2 * 2)
+    reframe = shape != "original"
+    out = media.SHAPES.get(shape, (media.OUT_W, media.OUT_H))
+    size = out if reframe else (info.width // 2 * 2, info.height // 2 * 2)
     manifest = {"title": title, "source": source, "video": str(video), "fps": info.fps,
                 "width": size[0], "height": size[1], "parts": []}
 
-    crop_w = min(info.width, round(info.height * 9 / 16 / 2) * 2)
+    crop_w = min(info.width, round(info.height * out[0] / out[1] / 2) * 2)
     aw = min(640, info.width)
     ah = max(2, round(aw * info.height / info.width / 2) * 2)
-    shape = "already vertical, fitting it" if info.vertical else f"cropping {crop_w}x{info.height} around faces"
+    how = f"already {shape} or narrower, fitting it" if info.fits(out) \
+        else f"cropping {crop_w}x{info.height} around faces for {shape}"
     if not reframe:
-        shape = "keeping the original shape"
+        how = "keeping the original shape"
     say(f"{title}\n  {info.width}x{info.height} {info.fps:.5g} fps, {format_time(info.duration)} long; "
-        f"{len(segments)} clip(s); {shape}")
+        f"{len(segments)} clip(s); {how}")
 
     digits = max(2, len(str(len(segments))))
     work = Path(tempfile.mkdtemp(prefix="clipper-"))
@@ -64,16 +70,16 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
                      "duration": round((b - a) / info.fps, 6), "frames": b - a, "file": file}
             label = f"[{n}/{len(segments)}] {file}  {entry['start']} -> {entry['end']}"
             previous = old.get(n, {})
-            entry["shape"] = "vertical" if reframe else "original"
+            entry["shape"] = shape
             same = all(previous.get(k) == entry[k] for k in ("start_seconds", "end_seconds", "file")) \
-                and previous.get("shape", "vertical") == entry["shape"]
+                and previous.get("shape", "9:16") == entry["shape"]
             if (folder / file).exists() and same and not force:
                 say(f"{label}  already done, skipping")
                 manifest["parts"].append(previous)
                 continue
             began = time.time()
             crop_x = None
-            if reframe and not info.vertical:
+            if reframe and not info.fits(out):
                 if isinstance(detector, str):
                     detector = make_detector(detector, say)
                 track = analyse(media.read_frames(video, a / info.fps, b - a, aw, ah), b - a, info.fps,
@@ -83,7 +89,7 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
                 entry["shots"] = len(track.shots)
                 entry["face_seen"] = f"{track.faces_found}/{track.detections} checks"
             media.write_clip(video, folder / file, a / info.fps, b - a, info, crop_x, crop_w, work,
-                             lambda p: status(f"{label}  encoding {p:4.0%}"), preset, crf, reframe)
+                             lambda p: status(f"{label}  encoding {p:4.0%}"), preset, crf, reframe, out)
             status("")
             extra = f"  {entry['shots']} shot(s), face in {entry['face_seen']}" if crop_x else ""
             say(f"{label}  done in {time.time() - began:.0f}s{extra}")
@@ -145,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preset", default="faster",
                         choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"],
                         help="x264 speed/size trade-off (default faster; slower = smaller files)")
+    parser.add_argument("--shape", default="9:16", choices=["9:16", "4:5", "1:1", "original"],
+                        help="clip shape (default 9:16); the cropped shapes follow the faces")
     args = parser.parse_args(argv)
     try:
         if args.times and args.cuts:
@@ -161,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
         if start == "end":
             raise ClipperError("--start can't be \"end\".")
         run(args.source, ends, start, Path(args.out), Path(args.downloads), args.max_height,
-            args.force, args.detector, preset=args.preset)
+            args.force, args.detector, preset=args.preset, shape=args.shape)
     except ClipperError as e:
         status("")
         print(f"\nError: {e}", file=sys.stderr)

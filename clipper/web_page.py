@@ -34,6 +34,14 @@ video{width:100%;border-radius:10px;background:#000;margin-top:12px;max-height:5
 .marks{display:flex;gap:8px;margin-top:8px}.marks button{flex:1}
 .pick{display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;background:var(--card);border:1px solid var(--line);margin-bottom:8px;font-weight:500}
 .pick.on{border-color:var(--accent)}
+.seg{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:4px;background:#0d0e10;border:1px solid var(--line);border-radius:10px;padding:4px}
+.seg label{margin:0;text-align:center;padding:8px 2px;border-radius:8px;color:var(--dim);cursor:pointer;font-size:14px;line-height:1.2}
+.seg label b{display:block;color:inherit;font-size:15px}
+@media (max-width:440px){.seg{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.seg label{position:relative;overflow:hidden}
+.seg input{position:absolute;inset:0;width:1px;height:1px;padding:0;border:0;opacity:0;pointer-events:none}
+.seg label:has(input:checked){background:#2a2d33;color:#fff}
+.seg label:has(input:focus-visible){outline:2px solid var(--accent)}
 .x{background:none;color:var(--dim);min-height:36px;padding:6px 8px;font-weight:500}
 </style></head><body><main>
 <h1>Clipper</h1>
@@ -59,7 +67,15 @@ video{width:100%;border-radius:10px;background:#000;margin-top:12px;max-height:5
         <div><label for="start">Start</label><input class="time" id="start" placeholder="0:00" inputmode="decimal"></div>
         <div><label for="end">End</label><input class="time" id="end" placeholder="end" inputmode="decimal"></div>
       </div>
-      <button class="main" id="make">Make 9:16 clip</button>
+      <label>Shape</label>
+      <div class="seg" id="shapes">
+        <label><input type="radio" name="shape" value="original" checked><b>Original</b>as filmed</label>
+        <label><input type="radio" name="shape" value="9:16"><b>9:16</b>TikTok, Reels</label>
+        <label><input type="radio" name="shape" value="4:5"><b>4:5</b>Feed post</label>
+        <label><input type="radio" name="shape" value="1:1"><b>1:1</b>Square</label>
+      </div>
+      <div class="small" style="margin-top:6px">9:16, 4:5 and 1:1 are cropped to follow the faces.</div>
+      <button class="main" id="make">Make clip</button>
       <div class="err" id="cliperr"></div>
     </div>
     <div id="vfailed" hidden style="margin-top:10px"><button id="vretry">Try again</button></div>
@@ -81,6 +97,13 @@ const step = t => { const m = String(t || "").match(/(finding faces|encoding|dow
   return m ? `${m[1][0].toUpperCase() + m[1].slice(1)} ${m[2]}%` : String(t || "").trim(); };
 let state = {videos: {}, jobs: {}}, current = null, shownFor = null;
 try { current = localStorage.getItem("clipper.video"); } catch (e) {}
+try {   // the last shape picked stays picked
+  const last = localStorage.getItem("clipper.shape");
+  const radio = last && document.querySelector(`#shapes input[value="${CSS.escape(last)}"]`);
+  if (radio) radio.checked = true;
+} catch (e) {}
+const shape = () => document.querySelector("#shapes input:checked").value;
+document.querySelector("#shapes").addEventListener("change", () => { try { localStorage.setItem("clipper.shape", shape()); } catch (e) {} });
 
 async function api(path, body) {
   const r = await fetch(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body || {})});
@@ -160,7 +183,7 @@ function renderCurrent(id) {
   const clips = clipsOf(id);
   $("#clips").hidden = !clips.length;
   const html = clips.map(([jid, j]) => {
-    let right, note = `${clock(j.start)} → ${clock(j.end)}`;
+    let right, note = `${clock(j.start)} → ${clock(j.end)} · ${j.shape === "original" ? "original" : esc(j.shape || "9:16")}`;
     if (j.status === "done") { note += ` · ${mb(j.size)}`; right = `<a class="btn dl" href="/media/clip/${jid}">Download</a>`; }
     else if (j.status === "failed") { note = esc(j.message); right = `<button data-a="retry" data-id="${jid}">Try again</button>`; }
     else { note += " · " + esc(j.status === "waiting" ? "waiting its turn" : step(j.progress) || "working"); right = ""; }
@@ -178,7 +201,7 @@ $("#markend").addEventListener("click", () => $("#end").value = clock($("#player
 $("#make").addEventListener("click", async () => {
   $("#cliperr").textContent = ""; $("#make").disabled = true;
   try {
-    await api("/api/clip", {video: current, start: $("#start").value, end: $("#end").value});
+    await api("/api/clip", {video: current, start: $("#start").value, end: $("#end").value, shape: shape()});
     await load();
     const s = nextStart(current); $("#start").value = s ? clock(s) : ""; $("#end").value = "";
   } catch (x) { $("#cliperr").textContent = x.message; }

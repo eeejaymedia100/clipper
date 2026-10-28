@@ -123,3 +123,24 @@ def test_plain_english_errors(box_video, tmp_path, capsys, monkeypatch):
     monkeypatch.setattr(media.shutil, "which", lambda tool: None)
     assert main([str(box_video), "-t", "5", "-o", str(tmp_path)]) == 1
     assert "ffmpeg is not installed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("shape, size", [("1:1", (1080, 1080)), ("4:5", (1080, 1350))])
+def test_square_and_portrait_follow_the_box_too(box_video, tmp_path, shape, size):
+    manifest = run(str(box_video), [3.5], out_root=tmp_path, detector=box_detector, shape=shape)
+    clip = tmp_path / "Box_Story_Ep1" / manifest["parts"][0]["file"]
+    v = stream(clip, "v:0")
+    assert (v["width"], v["height"], int(v["nb_read_frames"])) == (*size, 84)
+    w, h = size[0] // 4, size[1] // 4
+    offsets = []
+    for frame in media.read_frames(clip, 0, 10_000, w, h):
+        xs = np.nonzero(frame.min(axis=2) > 200)[1]
+        assert len(xs) > 20, "the box left the frame"
+        offsets.append(abs(xs.mean() - w / 2) / w)
+    # the "face" stays near the middle; a wide crop can't follow past the edge of the source
+    assert np.mean(offsets) < 0.04 and max(offsets) < 0.15
+
+
+def test_an_unknown_shape_is_explained(box_video, tmp_path):
+    with pytest.raises(ClipperError, match='Unknown shape "2:1"'):
+        run(str(box_video), [END], out_root=tmp_path, detector=box_detector, shape="2:1")

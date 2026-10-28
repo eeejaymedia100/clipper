@@ -30,6 +30,7 @@ from .faces import make_detector
 from .times import END, ClipperError, format_time, parse_time
 from .web_page import PAGE
 
+SHAPES = ("original", "9:16", "4:5", "1:1")
 MAX_HEIGHT = 1440               # sharper 9:16 crops than 1080p, still quick to download and decode
 MIN_FREE_BYTES = 5 * 10**9      # never let downloads fill the disk the other sites live on
 
@@ -163,16 +164,19 @@ class Worker:
         if v["status"] != "ready":
             raise ClipperError(f"The video isn't saved yet: {v.get('message') or v['status']}")
         store.update("jobs", jid, status="working", message="")
-        if self.detector is None:
+        shape = j.get("shape", "9:16")
+        if self.detector is None and shape != "original":
             self.detector = make_detector(self.detector_name, media.say)
         work = store.clips / jid
         manifest = run(str(store.library / v["file"]), [j["end"]], j["start"], out_root=work,
-                       detector=self.detector, preset=self.preset, crf=18, title=v["title"])
+                       detector=self.detector or self.detector_name, preset=self.preset, crf=18,
+                       shape=shape, title=v["title"])
         made = work / media.safe_name(v["title"]) / manifest["parts"][0]["file"]
-        name = f"{media.safe_name(v['title'])}_part{j['part']:02d}.mp4"
+        name = f"{media.safe_name(v['title'])}_part{j['part']:02d}_{shape.replace(':', 'x')}.mp4"
         made.replace(work / name)
         shutil.rmtree(made.parent, ignore_errors=True)
         store.update("jobs", jid, status="done", progress="", file=name, size=(work / name).stat().st_size,
+                     width=manifest["width"], height=manifest["height"],
                      end=manifest["parts"][0]["end_seconds"])
 
 
@@ -360,10 +364,14 @@ def make_handler(store: Store, worker: Worker):
                     if end > v["duration"] + 0.05:
                         raise ClipperError(f"The end is past the end of the video ({format_time(v['duration'])}). "
                                            "Leave it empty to clip to the end.")
+                shape = str(data.get("shape") or "original")
+                if shape not in SHAPES:
+                    raise ClipperError(f"Pick a shape: {', '.join(SHAPES)}.")
                 part = 1 + sum(1 for j in store.state["jobs"].values() if j["video"] == vid)
                 jid = uuid.uuid4().hex[:10]
                 store.state["jobs"][jid] = {"video": vid, "start": start,
                                             "end": v["duration"] if end == END else end, "part": part,
+                                            "shape": shape,
                                             "status": "waiting", "progress": "", "message": "",
                                             "created": time.time()}
                 store.save()

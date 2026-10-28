@@ -65,6 +65,14 @@ def site(tmp_path, box_video, monkeypatch):
     media.listeners.clear()
 
 
+def probe(path):
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries",
+                          "stream=width,height,nb_read_frames", "-of", "json", str(path)],
+                         capture_output=True, text=True).stdout
+    stream = json.loads(out)["streams"][0]
+    return stream["width"], stream["height"], int(stream["nb_read_frames"])
+
+
 def saved(browser, url="https://example.com/watch?v=1"):
     status, body = browser.json("/api/video", {"url": url})
     assert status == 200
@@ -90,21 +98,20 @@ def test_paste_a_link_clip_part_by_part_and_download(site):
         time.sleep(0.3)
     assert downloads == [("https://example.com/watch?v=1", web.MAX_HEIGHT)]
 
-    # part 1: 0:00 to 0:04, part 2: from 4 to the end (end left empty)
-    _, one = browser.json("/api/clip", {"video": vid, "start": "0:00", "end": "0:04"})
-    _, two = browser.json("/api/clip", {"video": vid, "start": "4", "end": ""})
+    # part 1: 0:00 to 0:04 in 9:16, part 2: from 4 to the end (end left empty) in 1:1
+    _, one = browser.json("/api/clip", {"video": vid, "start": "0:00", "end": "0:04", "shape": "9:16"})
+    _, two = browser.json("/api/clip", {"video": vid, "start": "4", "end": "", "shape": "1:1"})
     one, two = browser.wait("jobs", one["job"]), browser.wait("jobs", two["job"])
     assert one["status"] == two["status"] == "done", (one, two)
-    assert (one["file"], one["part"]) == ("Box_Story_Ep1_part01.mp4", 1)
-    assert (two["file"], two["start"], round(two["end"])) == ("Box_Story_Ep1_part02.mp4", 4, 10)
+    assert (one["file"], one["part"]) == ("Box_Story_Ep1_part01_9x16.mp4", 1)
+    assert (two["file"], two["start"], round(two["end"])) == ("Box_Story_Ep1_part02_1x1.mp4", 4, 10)
 
-    # every clip is 1080x1920 (9:16) and exactly as long as asked
-    jid = next(k for k, j in browser.json("/api/state")[1]["jobs"].items() if j["part"] == 1)
-    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_frames", "-show_entries",
-                          "stream=width,height,nb_read_frames", "-of", "json", str(data / "clips" / jid / one["file"])],
-                         capture_output=True, text=True).stdout
-    stream = json.loads(out)["streams"][0]
-    assert (stream["width"], stream["height"], int(stream["nb_read_frames"])) == (1080, 1920, 96)
+    # each clip has its shape's size and is exactly as long as asked
+    jobs = browser.json("/api/state")[1]["jobs"]
+    jid = next(k for k, j in jobs.items() if j["part"] == 1)
+    two_id = next(k for k, j in jobs.items() if j["part"] == 2)
+    assert probe(data / "clips" / jid / one["file"]) == (1080, 1920, 96)
+    assert probe(data / "clips" / two_id / two["file"]) == (1080, 1080, 144)
 
     # downloads have a size and resume (the phone's download manager carries on in the background)
     status, headers, whole = browser.call(f"/media/clip/{jid}")
@@ -192,3 +199,23 @@ def test_deleting_a_video_removes_its_clips_and_restarts_carry_on(site):
     again = Browser(f"http://127.0.0.1:{server.server_address[1]}")
     assert again.wait("jobs", "j1")["status"] == "done"
     server.shutdown()
+
+
+@pytest.mark.parametrize("shape, size", [(None, (640, 360)), ("original", (640, 360)), ("4:5", (1080, 1350))])
+def test_original_is_the_default_and_every_shape_has_its_size(site, shape, size):
+    browser, _, data = site
+    vid, _ = saved(browser)
+    body = {"video": vid, "start": "0", "end": "2"}
+    if shape:
+        body["shape"] = shape
+    _, job = browser.json("/api/clip", body)
+    done = browser.wait("jobs", job["job"])
+    assert done["status"] == "done" and (done["width"], done["height"]) == size
+    assert probe(data / "clips" / job["job"] / done["file"]) == (*size, 48)
+
+
+def test_an_unknown_shape_is_refused(site):
+    browser, _, _ = site
+    vid, _ = saved(browser)
+    status, body = browser.json("/api/clip", {"video": vid, "start": "0", "end": "2", "shape": "21:9"})
+    assert status == 400 and body["error"].startswith("Pick a shape")

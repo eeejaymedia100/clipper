@@ -16,6 +16,8 @@ import numpy as np
 from .times import ClipperError
 
 OUT_W, OUT_H = 1080, 1920
+# output size of each shape; "original" keeps the source frame
+SHAPES = {"9:16": (1080, 1920), "4:5": (1080, 1350), "1:1": (1080, 1080)}
 
 
 def require_tools() -> None:
@@ -36,7 +38,11 @@ class VideoInfo:
     @property
     def vertical(self) -> bool:
         """Already 9:16 (or narrower, within 5%): fit and pad instead of cropping."""
-        return self.width / self.height <= OUT_W / OUT_H * 1.05
+        return self.fits((OUT_W, OUT_H))
+
+    def fits(self, size: tuple[int, int]) -> bool:
+        """No wider than the output shape (within 5%): fit and pad instead of cropping."""
+        return self.width / self.height <= size[0] / size[1] * 1.05
 
 
 def probe(path: Path) -> VideoInfo:
@@ -182,8 +188,8 @@ def read_frames(path: Path, start: float, frames: int, width: int, height: int) 
 def write_clip(src: Path, out: Path, start: float, frames: int, info: VideoInfo,
                crop_x: list[int] | None, crop_w: int, workdir: Path,
                progress: Callable[[float], None], preset: str = "faster", crf: int = 20,
-               reframe: bool = True) -> None:
-    """Cut [start, start+frames) frame-accurately, reframe to 1080x1920, H.264 + faststart.
+               reframe: bool = True, size: tuple[int, int] = (OUT_W, OUT_H)) -> None:
+    """Cut [start, start+frames) frame-accurately, reframe to `size` (1080x1920 by default), H.264 + faststart.
 
     crop_x holds the left edge of the crop for every frame (source pixels). It is fed to
     ffmpeg's crop filter through sendcmd, so a cut snaps on its exact frame.
@@ -191,9 +197,9 @@ def write_clip(src: Path, out: Path, start: float, frames: int, info: VideoInfo,
     duration = frames / info.fps
     if not reframe:     # keep the original shape and size
         chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-    elif info.vertical or crop_x is None:
-        chain = (f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
-                 f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2:black")
+    elif info.fits(size) or crop_x is None:
+        chain = (f"scale={size[0]}:{size[1]}:force_original_aspect_ratio=decrease:flags=lanczos,"
+                 f"pad={size[0]}:{size[1]}:(ow-iw)/2:(oh-ih)/2:black")
     else:
         commands = workdir / f"{out.stem}.cmd"
         lines, last = [], None
@@ -206,7 +212,7 @@ def write_clip(src: Path, out: Path, start: float, frames: int, info: VideoInfo,
         commands.write_text("\n".join(lines) + "\n")
         chain = (f"sendcmd=f={_filter_path(commands)},"
                  f"crop@track=w={crop_w}:h={info.height}:x={crop_x[0]}:y=0:exact=1,"
-                 f"scale={OUT_W}:{OUT_H}:flags=lanczos")
+                 f"scale={size[0]}:{size[1]}:flags=lanczos")
     chain += ",setsar=1,format=yuv420p"
 
     tmp = out.with_name(out.stem + ".partial.mp4")

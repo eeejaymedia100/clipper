@@ -141,7 +141,8 @@ class Worker:
             if not preview.exists():
                 part = preview.with_name(f"{vid}.partial.mp4")
                 done = subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", str(self.store.library / v["file"]),
+                    # lowest priority: a clip you asked for always gets the CPU first
+                    ["nice", "-n", "19", "ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", str(self.store.library / v["file"]),
                      "-vf", "scale=-2:360,fps=15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34",
                      "-g", "30", "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", str(part)],
                     capture_output=True)

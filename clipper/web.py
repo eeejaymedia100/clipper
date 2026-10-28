@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -16,6 +17,7 @@ import queue
 import re
 import secrets
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -34,6 +36,7 @@ from .times import END, ClipperError, format_time, parse_time, parse_times_text
 from .web_page import LOGIN_PAGE, PAGE
 
 QUALITIES = {"1080": 1080, "best": 2160}
+MIN_FREE_BYTES = 5 * 10**9      # never let downloads fill the disk the other sites live on
 COOKIE = "clipper"
 
 
@@ -116,8 +119,13 @@ class Worker:
         v = store.state["videos"].get(vid)
         if not v:
             return
+        free = shutil.disk_usage(store.data).free
+        if free < MIN_FREE_BYTES + 10**9:
+            raise ClipperError(f"The server is nearly full ({free / 1e9:.1f} GB free). "
+                               "Delete some saved videos or clips first.")
         store.update("videos", vid, status="downloading", message="")
-        path, title = media.download(v["url"], store.library, QUALITIES.get(v["quality"], 1080), media.say)
+        path, title = media.download(v["url"], store.library, QUALITIES.get(v["quality"], 1080), media.say,
+                                     max_bytes=free - MIN_FREE_BYTES)
         info = media.probe(path)
         store.update("videos", vid, status="preview", title=title, file=path.name, duration=info.duration,
                      width=info.width, height=info.height, size=path.stat().st_size,
@@ -156,6 +164,35 @@ class Worker:
                   "size": (folder / p["file"]).stat().st_size} for p in manifest["parts"]]
         store.update("jobs", jid, status="done", progress="", clips=clips, folder=folder.name,
                      width=manifest["width"], height=manifest["height"])
+
+
+def check_public(url: str) -> None:
+    """Refuse links that point back into this server or its private network."""
+    host = urlparse(url).hostname or ""
+    try:
+        addresses = {info[4][0] for info in socket.getaddrinfo(host, None)}
+    except (socket.gaierror, UnicodeError):
+        return      # unknown name: the download itself will explain
+    for address in addresses:
+        if not ipaddress.ip_address(address.split("%")[0]).is_global:
+            raise ClipperError("That link points inside the server. Use a public video link.")
+
+
+_zip_lock = threading.Lock()
+
+
+def make_zip(store: Store, jid: str, job: dict) -> Path:
+    """All of a job's clips in one .zip on disk, so it downloads with a size and can resume."""
+    folder = store.clips / jid / job["folder"]
+    target = store.clips / jid / f"{job['folder']}.zip"
+    with _zip_lock:
+        if not target.exists():
+            part = target.with_suffix(".partial")
+            with zipfile.ZipFile(part, "w", zipfile.ZIP_STORED, allowZip64=True) as z:
+                for c in job["clips"]:
+                    z.write(folder / c["file"], c["file"])
+            part.replace(target)
+    return target
 
 
 # ---------------------------------------------------------------- the website
@@ -277,38 +314,10 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                 if parts[:2] == ["media", "zip"] and len(parts) == 3:
                     j = store.state["jobs"].get(parts[2])
                     if j and j.get("clips"):
-                        return self.send_zip(parts[2], j)
+                        return self.send_file(make_zip(store, parts[2], j), f"{j['folder']}.zip", True)
             except (BrokenPipeError, ConnectionResetError):
                 return
             self.error("Not found.", 404)
-
-        def send_zip(self, jid: str, j: dict):
-            folder = store.clips / jid / j["folder"]
-            self.send_response(200)
-            self.send_header("Content-Type", "application/zip")
-            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(j['folder'])}.zip")
-            self.send_header("Connection", "close")
-            self.end_headers()
-            self.close_connection = True
-
-            class Out:          # zipfile writes a streamable zip to anything with write()
-                def __init__(self, w):
-                    self.w, self.n = w, 0
-
-                def write(self, b):
-                    self.w.write(b)
-                    self.n += len(b)
-                    return len(b)
-
-                def tell(self):
-                    return self.n
-
-                def flush(self):
-                    self.w.flush()
-
-            with zipfile.ZipFile(Out(self.wfile), "w", zipfile.ZIP_STORED, allowZip64=True) as z:
-                for c in j["clips"]:
-                    z.write(folder / c["file"], c["file"])
 
         def do_POST(self):
             url = urlparse(self.path)
@@ -332,11 +341,15 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                     self.send_header("Content-Length", "0")
                     self.end_headers()
                     return
+                if len(failures) > 1000:
+                    failures.clear()
                 failures[ip] = recent + [time.time()]
                 time.sleep(1)
                 return self.send(401, LOGIN_PAGE.replace("<!--msg-->", "Wrong password."))
             if not self.signed_in():
                 return self.error("Please sign in again.", 401)
+            if not self.headers.get("Content-Type", "").startswith("application/json"):
+                return self.error("Send JSON.", 415)     # a form on another site can't send JSON
             try:
                 if url.path == "/api/add":
                     return self.json(self.add(data))
@@ -345,11 +358,15 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                     return self.json(self.delete(m.group(1), m.group(2)))
                 m = re.fullmatch(r"/api/jobs/([\w-]+)/retry", url.path)
                 if m and m.group(1) in store.state["jobs"]:
+                    if store.state["jobs"][m.group(1)]["status"] != "failed":
+                        raise ClipperError("Only clips that failed can be tried again.")
                     store.update("jobs", m.group(1), status="waiting", message="", progress="")
                     worker.tasks.put(("job", m.group(1)))
                     return self.json({"ok": True})
                 m = re.fullmatch(r"/api/videos/([\w-]+)/retry", url.path)
                 if m and m.group(1) in store.state["videos"]:
+                    if store.state["videos"][m.group(1)]["status"] != "failed":
+                        raise ClipperError("Only videos that failed can be tried again.")
                     store.update("videos", m.group(1), status="waiting", message="", progress="")
                     worker.tasks.put(("video", m.group(1)))
                     return self.json({"ok": True})
@@ -375,6 +392,7 @@ def make_handler(store: Store, worker: Worker, password: str, secret: bytes):
                     if not link:
                         raise ClipperError("Paste a video link (it starts with https://).")
                     url = link.group(0)
+                    check_public(url)
                     quality = "best" if data.get("quality") == "best" else "1080"
                     vid = next((k for k, v in videos.items() if v["url"] == url and v["status"] != "failed"),
                                None)

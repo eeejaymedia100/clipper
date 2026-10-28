@@ -64,7 +64,7 @@ class Browser:
 def site(tmp_path, box_video, monkeypatch):
     downloads = []
 
-    def fake_download(url, folder, max_height, say):    # stands in for yt-dlp: "downloads" the box video
+    def fake_download(url, folder, max_height, say, max_bytes=None):    # stands in for yt-dlp: "downloads" the box video
         downloads.append((url, max_height))
         folder.mkdir(parents=True, exist_ok=True)
         target = folder / "abc123.mp4"
@@ -188,3 +188,54 @@ def test_deleting_and_carrying_on_after_a_restart(site, tmp_path, box_video):
     again.cookie = browser.cookie                  # still signed in after a restart
     assert again.wait("jobs", "j1")["status"] == "done"
     server.shutdown()
+
+
+def test_zip_downloads_can_resume_in_the_background(site):
+    """The phone's download manager keeps going after the site is closed, and resumes with Range."""
+    browser, _, _ = site
+    sign_in(browser)
+    _, added = browser.json("/api/add", {"url": "https://example.com/z", "times": "4, end"})
+    assert browser.wait("jobs", added["job"])["status"] == "done"
+    status, headers, whole = browser.call(f"/media/zip/{added['job']}")
+    assert status == 200 and int(headers["Content-Length"]) == len(whole)
+    assert headers["Accept-Ranges"] == "bytes" and headers["Content-Disposition"].startswith("attachment")
+    status, headers, rest = browser.call(f"/media/zip/{added['job']}", headers={"Range": "bytes=1000-"})
+    assert status == 206 and rest == whole[1000:]
+    status, _, clip = browser.call(f"/media/clip/{added['job']}/Box_Story_Ep1_part02.mp4",
+                                   headers={"Range": "bytes=500-"})
+    assert status == 206 and len(clip) > 0
+
+
+@pytest.mark.parametrize("link", ["http://127.0.0.1:4880/", "http://169.254.169.254/latest", "http://localhost/x",
+                                  "http://10.0.0.5/v.mp4", "http://[::1]/v"])
+def test_links_into_the_server_itself_are_refused(site, link):
+    browser, downloads, _ = site
+    sign_in(browser)
+    status, body = browser.json("/api/add", {"url": link})
+    assert status == 400 and "public" in body["error"]
+    assert downloads == []
+
+
+def test_a_nearly_full_disk_stops_downloads(site, monkeypatch):
+    browser, downloads, _ = site
+    sign_in(browser)
+    monkeypatch.setattr(web, "MIN_FREE_BYTES", 10**18)
+    _, added = browser.json("/api/add", {"url": "https://example.com/big"})
+    video = browser.wait("videos", added["video"])
+    assert video["status"] == "failed" and "nearly full" in video["message"] and downloads == []
+
+
+def test_other_sites_cannot_send_forms_to_the_api(site):
+    browser, _, _ = site
+    sign_in(browser)
+    status, _, _ = browser.call("/api/add", {"url": "https://example.com/v"}, form=True)
+    assert status == 415
+
+
+def test_only_failed_things_can_be_tried_again(site):
+    browser, downloads, _ = site
+    sign_in(browser)
+    _, added = browser.json("/api/add", {"url": "https://example.com/once"})
+    browser.wait("videos", added["video"])
+    assert browser.json(f"/api/videos/{added['video']}/retry", {})[0] == 400
+    assert len(downloads) == 1

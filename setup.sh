@@ -77,6 +77,7 @@ User=$USER
 WorkingDirectory=$REPO
 Environment=PATH=$HOME/.deno/bin:/usr/local/bin:/usr/bin:/bin
 Environment=PYTHONUNBUFFERED=1
+ExecStartPre=-$REPO/.venv/bin/pip install -q -U yt-dlp
 ExecStart=$REPO/.venv/bin/clipper web --host 0.0.0.0 --port 4880 --data $HOME/clipper-data
 Restart=always
 RestartSec=10

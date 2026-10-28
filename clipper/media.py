@@ -92,7 +92,8 @@ def is_url(source: str) -> bool:
     return bool(re.match(r"https?://", source))
 
 
-def download(url: str, folder: Path, max_height: int, say: Callable[[str], None]) -> tuple[Path, str]:
+def download(url: str, folder: Path, max_height: int, say: Callable[[str], None],
+             max_bytes: int | None = None) -> tuple[Path, str]:
     """Download once into folder/<id>.mp4. A second run with the same link reuses the file."""
     try:
         import yt_dlp
@@ -131,6 +132,8 @@ def download(url: str, folder: Path, max_height: int, say: Callable[[str], None]
         # YouTube needs a JavaScript runtime for most formats (1080p included): deno or node
         "js_runtimes": {"deno": {"path": None}, "node": {"path": None}},
     }
+    if max_bytes:
+        options["max_filesize"] = max_bytes
     say(f"Downloading {url} (up to {max_height}p) ...")
     try:
         with yt_dlp.YoutubeDL(options) as ydl:
@@ -143,7 +146,8 @@ def download(url: str, folder: Path, max_height: int, say: Callable[[str], None]
     if not path.exists():
         found = sorted(folder.glob(f"{info['id']}.*"))
         if not found:
-            raise ClipperError("The download finished but the video file is missing.")
+            raise ClipperError("The video didn't download. It may be bigger than the space left on the server, "
+                              "or the site refused it.")
         path = found[0]
     index[url] = {"file": path.name, "title": info.get("title") or info["id"]}
     index_file.write_text(json.dumps(index, indent=2, ensure_ascii=False))

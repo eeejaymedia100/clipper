@@ -90,7 +90,33 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
     return manifest
 
 
+def watch_main(argv: list[str]) -> int:
+    from .watch import watch
+    parser = argparse.ArgumentParser(
+        prog="clipper watch",
+        description="Make clips from job files dropped in FOLDER/jobs (the folder shared with your phone).")
+    parser.add_argument("folder", nargs="?", default="~/Clipper", help="the shared folder (default ~/Clipper)")
+    parser.add_argument("--downloads", default="~/.cache/clipper/downloads",
+                        help="where videos are downloaded; each is deleted once its clips are made")
+    parser.add_argument("--detector", choices=["auto", "imgutils", "opencv"], default="auto")
+    parser.add_argument("--preset", default="faster",
+                        choices=["ultrafast", "superfast", "veryfast", "faster", "fast", "medium", "slow"])
+    args = parser.parse_args(argv)
+    try:
+        media.require_tools()
+        watch(Path(args.folder).expanduser(), Path(args.downloads).expanduser(), args.detector, args.preset)
+    except ClipperError as e:
+        print(f"\nError: {e}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["watch"]:
+        return watch_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="clipper",
         description="Turn a long video into back-to-back vertical (9:16) clips that follow the main face.",

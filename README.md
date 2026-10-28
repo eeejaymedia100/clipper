@@ -5,7 +5,48 @@ The 9:16 window follows the main character's face, jumps on scene cuts and moves
 
 You watch the video and write down where each clip should **end**. clipper does the rest.
 
-## One-time setup
+## Straight to your phone (the easy way)
+
+Your phone and the server share a folder called `Clipper` through [Syncthing](https://syncthing.net).
+You put a text file with a link and end times in `Clipper/jobs`. The server downloads the video, makes the
+clips, and they appear in `Clipper/<video title>/` on your phone. There's no SSH and no copying.
+
+On the server, once:
+
+```bash
+git clone https://github.com/eeejaymedia100/clipper.git
+cd clipper
+./setup.sh
+```
+
+It installs everything and starts two background services, `syncthing@$USER` and `clipper`. At the end it
+prints the server's Syncthing ID and a QR code. Then:
+
+1. On your phone, install **Syncthing-Fork** (F-Droid or its GitHub page) and add a device by scanning that QR code.
+2. Copy your phone's own device ID from Syncthing-Fork and run `./setup.sh pair <phone ID>` on the server.
+3. Accept the server and the `Clipper` folder on your phone, and choose where the folder goes.
+
+To make clips, create a text file such as `Clipper/jobs/ep5.txt`:
+
+```text
+https://www.youtube.com/watch?v=XXXX
+start 1:30
+4:12
+9:30
+end
+```
+
+The link must be on the first line. `start` is optional. After that, list the end time of each clip.
+Any site yt-dlp supports works, including YouTube, TikTok, Facebook, X and Instagram.
+- If something is wrong, `jobs/ep5.status.txt` says what. Fix `ep5.txt` and save it again.
+- Finished jobs move to `jobs/done/`.
+- The downloaded video is deleted from the server once its clips are made.
+- Half-made clips are never synced, so your phone only downloads finished clips. If you're on mobile data, set Syncthing-Fork to sync on Wi-Fi only.
+
+To see what the server is doing, run `sudo journalctl -u clipper -f`.
+To get updates, run `git pull && ./setup.sh`.
+
+## One-time setup (command line)
 
 On the server (Ubuntu/Debian, CPU only):
 

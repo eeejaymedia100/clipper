@@ -1,0 +1,18 @@
+HOW TO MAKE CLIPS
+
+1. Open the "jobs" folder and make a new text file in it, e.g. naruto5.txt
+2. First line: the video link. Then the END time of each clip, one per line:
+
+   https://www.youtube.com/watch?v=XXXX
+   4:12
+   9:30
+   end
+
+   Clip 1 runs 0:00 to 4:12, clip 2 from 4:12 to 9:30, clip 3 to the end.
+   To skip an intro, add a line "start 1:30" under the link.
+   Times can also go on one line:  4:12, 9:30, end
+
+3. Save it. The clips appear in this folder, in a folder named after the video.
+   If something is wrong, a file naruto5.status.txt appears in "jobs" saying what.
+   Fix naruto5.txt, save it again, and it tries again.
+   Finished jobs move to jobs/done.

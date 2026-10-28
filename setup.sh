@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# One-time setup on a fresh Ubuntu/Debian server:   ./setup.sh
-# Then link your phone:                             ./setup.sh pair <YOUR-PHONE'S-DEVICE-ID>
+# One-time setup on a fresh Ubuntu/Debian server.
 #
-# Afterwards everything runs by itself: Syncthing keeps ~/Clipper the same on the server and the phone,
-# and the clipper service turns every job file in ~/Clipper/jobs into clips in ~/Clipper/<title>/.
+#   ./setup.sh            the website: open http://<server>:4880 on your phone, paste a link and times,
+#                         download the clips. Videos stay saved on the server.
+#   ./setup.sh folder     instead, a folder shared with your phone by Syncthing: a job file in
+#                         ~/Clipper/jobs becomes clips in ~/Clipper/<title>/. Then link the phone with
+#   ./setup.sh pair <YOUR-PHONE'S-DEVICE-ID>
 set -euo pipefail
 cd "$(dirname "$0")"
 REPO=$PWD
 FOLDER=$HOME/Clipper
+MODE=${1:-web}
 
 wait_for_syncthing() {
     for _ in $(seq 60); do
@@ -38,7 +41,7 @@ sudo apt-get update -q
 sudo apt-get install -y -q git ffmpeg python3 python3-venv python3-pip curl ca-certificates qrencode
 
 echo "== 2/5 Syncthing (keeps ~/Clipper the same on the server and your phone)"
-if ! command -v syncthing >/dev/null; then
+if [ "$MODE" = folder ] && ! command -v syncthing >/dev/null; then
     sudo mkdir -p /etc/apt/keyrings
     sudo curl -fsSL -o /etc/apt/keyrings/syncthing-archive-keyring.gpg https://syncthing.net/release-key.gpg
     echo "deb [signed-by=/etc/apt/keyrings/syncthing-archive-keyring.gpg] https://apt.syncthing.net/ syncthing stable-v2" \
@@ -61,6 +64,42 @@ echo "== 4/5 clipper"
 [ -x .venv/bin/python ] || python3 -m venv .venv
 .venv/bin/pip install -q --upgrade pip
 .venv/bin/pip install -q -r requirements.txt -e .
+
+if [ "$MODE" = web ]; then
+    echo "== 5/5 The website, as a background service"
+    sudo tee /etc/systemd/system/clipper-web.service >/dev/null <<UNIT
+[Unit]
+Description=clipper website
+After=network-online.target
+
+[Service]
+User=$USER
+WorkingDirectory=$REPO
+Environment=PATH=$HOME/.deno/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PYTHONUNBUFFERED=1
+ExecStart=$REPO/.venv/bin/clipper web --host 0.0.0.0 --port 4880 --data $HOME/clipper-data
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now clipper-web
+    sudo systemctl restart clipper-web
+    if command -v ufw >/dev/null && sudo ufw status | grep -q "Status: active"; then
+        sudo ufw allow 4880/tcp comment clipper
+    fi
+    for _ in $(seq 30); do [ -s "$HOME/clipper-data/password" ] && break; sleep 1; done
+    IP=$(curl -fsS -4 https://ifconfig.me 2>/dev/null || hostname -I | cut -d' ' -f1)
+    echo
+    echo "All set. On your phone open:   http://$IP:4880"
+    echo "Password:                      $(cat "$HOME/clipper-data/password")"
+    echo "(If it doesn't open, allow TCP port 4880 in your cloud provider's firewall.)"
+    exit 0
+fi
+
 mkdir -p "$FOLDER/jobs"
 cp -n "$REPO/phone-how-to.txt" "$FOLDER/how-to.txt"
 

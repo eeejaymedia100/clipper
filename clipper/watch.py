@@ -14,7 +14,7 @@ from pathlib import Path
 from .cli import run
 from .faces import Detector
 from .media import safe_name, say
-from .times import END, ClipperError, parse_list, parse_time
+from .times import END, ClipperError, parse_time, parse_time_line
 
 SETTLE_SECONDS = 3          # a file still being written or synced is left until it stops changing
 IGNORE = "// Half-made clips stay on the server until they are finished\n*.partial.mp4\n"
@@ -44,10 +44,8 @@ def read_job(path: Path) -> tuple[str, float, list]:
                 if value == END:
                     raise ClipperError('"start" can\'t be "end".')
                 start = value
-            elif "," in line:
-                ends += parse_list(line)
             else:
-                ends.append(parse_time(re.split(r"\s+", line, maxsplit=1)[0]))
+                ends += parse_time_line(line)
         except ClipperError as e:
             if source is None:
                 raise

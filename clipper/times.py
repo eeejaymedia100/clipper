@@ -51,6 +51,29 @@ def parse_list(text: str) -> list[float | str]:
     return [parse_time(t) for t in tokens]
 
 
+def parse_time_line(line: str) -> list[float | str]:
+    """One typed line: "4:12 the fight" (a note after the time) or "4:12, 9:30, end"."""
+    if "," in line:
+        return parse_list(line)
+    return [parse_time(re.split(r"\s+", line.strip(), maxsplit=1)[0])]
+
+
+def parse_times_text(text: str) -> list[float | str]:
+    """End times typed in a box: one per line or comma separated; # lines and blank lines skipped."""
+    times: list[float | str] = []
+    lines = [line.strip() for line in text.splitlines()]
+    for number, line in enumerate(lines, 1):
+        if not line or line.startswith("#"):
+            continue
+        try:
+            times += parse_time_line(line)
+        except ClipperError as e:
+            raise ClipperError(f"line {number}: {e}" if len([x for x in lines if x]) > 1 else str(e)) from None
+    if not times:
+        raise ClipperError("Add the end time of each clip, one per line, e.g. 4:12 then end.")
+    return times
+
+
 def read_cuts_file(path: str | Path) -> list[float | str]:
     """One time per line. Anything after the time is a note. Blank lines and # lines are skipped."""
     path = Path(path)

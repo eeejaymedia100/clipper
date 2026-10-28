@@ -5,7 +5,37 @@ The 9:16 window follows the main character's face, jumps on scene cuts and moves
 
 You watch the video and write down where each clip should **end**. clipper does the rest.
 
-## Straight to your phone (the easy way)
+## The website (easiest)
+
+Open the site on your phone and paste a link, then optionally the end time of each clip. The server
+downloads the video and **keeps it**, so you can make more clips from it later without downloading it
+again. You download only the finished clips, at full quality (H.264, CRF 18).
+
+- **Save a video for later.** Paste the link and leave the times empty.
+- **Find your times.** Tap *Make clips* on a saved video, then *Watch small preview*. The preview is a
+  360p copy of a few MB. Tap *Clip ends here* at each point you want a cut.
+- **Choose the shape.** *Vertical 9:16, follows faces* or *Original shape* (the source frame, uncropped).
+- **Download.** Each clip has its own button, or use *Download all (.zip)*. You can also download the
+  whole saved video.
+- **Resumes after a restart.** If the server restarts, anything unfinished carries on.
+
+On a server:
+
+```bash
+git clone https://github.com/eeejaymedia100/clipper.git
+cd clipper
+./setup.sh
+```
+
+It prints the address (`http://<server IP>:4880`) and the password. The password is kept in
+`~/clipper-data/password`, or you can set it yourself with `CLIPPER_PASSWORD`. Videos and clips live in
+`~/clipper-data`. You can delete them from the site.
+
+To run it by hand: `clipper web --host 0.0.0.0 --port 4880 --data ~/clipper-data`.
+
+## Straight to a phone folder (Syncthing)
+
+Use `./setup.sh folder` for this mode instead of the website.
 
 Your phone and the server share a folder called `Clipper` through [Syncthing](https://syncthing.net).
 You put a text file with a link and end times in `Clipper/jobs`. The server downloads the video, makes the
@@ -16,7 +46,7 @@ On the server, once:
 ```bash
 git clone https://github.com/eeejaymedia100/clipper.git
 cd clipper
-./setup.sh
+./setup.sh folder
 ```
 
 It installs everything and starts two background services, `syncthing@$USER` and `clipper`. At the end it
@@ -44,7 +74,7 @@ Any site yt-dlp supports works, including YouTube, TikTok, Facebook, X and Insta
 - Half-made clips are never synced, so your phone only downloads finished clips. If you're on mobile data, set Syncthing-Fork to sync on Wi-Fi only.
 
 To see what the server is doing, run `sudo journalctl -u clipper -f`.
-To get updates, run `git pull && ./setup.sh`.
+To get updates, run `git pull && ./setup.sh folder`.
 
 ## One-time setup (command line)
 

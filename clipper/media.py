@@ -177,14 +177,17 @@ def read_frames(path: Path, start: float, frames: int, width: int, height: int) 
 
 def write_clip(src: Path, out: Path, start: float, frames: int, info: VideoInfo,
                crop_x: list[int] | None, crop_w: int, workdir: Path,
-               progress: Callable[[float], None], preset: str = "faster") -> None:
+               progress: Callable[[float], None], preset: str = "faster", crf: int = 20,
+               reframe: bool = True) -> None:
     """Cut [start, start+frames) frame-accurately, reframe to 1080x1920, H.264 + faststart.
 
     crop_x holds the left edge of the crop for every frame (source pixels). It is fed to
     ffmpeg's crop filter through sendcmd, so a cut snaps on its exact frame.
     """
     duration = frames / info.fps
-    if info.vertical or crop_x is None:
+    if not reframe:     # keep the original shape and size
+        chain = "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    elif info.vertical or crop_x is None:
         chain = (f"scale={OUT_W}:{OUT_H}:force_original_aspect_ratio=decrease:flags=lanczos,"
                  f"pad={OUT_W}:{OUT_H}:(ow-iw)/2:(oh-ih)/2:black")
     else:
@@ -206,7 +209,7 @@ def write_clip(src: Path, out: Path, start: float, frames: int, info: VideoInfo,
     cmd = ["ffmpeg", "-y", "-v", "error", "-nostats", "-progress", "pipe:1",
            "-ss", f"{start:.6f}", "-i", str(src),
            "-filter_complex", f"[0:v]{chain}[v]", "-map", "[v]", "-frames:v", str(frames),
-           "-c:v", "libx264", "-preset", preset, "-crf", "20", "-r", f"{info.fps:.6f}"]
+           "-c:v", "libx264", "-preset", preset, "-crf", str(crf), "-r", f"{info.fps:.6f}"]
     if info.has_audio:
         cmd += ["-map", "0:a:0", "-c:a", "aac", "-b:a", "192k", "-t", f"{duration:.6f}"]
     cmd += ["-movflags", "+faststart", str(tmp)]
@@ -230,11 +233,19 @@ def _filter_path(path: Path) -> str:
     return str(path).replace("\\", "/").replace(":", r"\:").replace("'", r"\'").replace(",", r"\,")
 
 
+# extra places progress goes (the website shows it); each gets (kind, text) with kind "say" or "status"
+listeners: list[Callable[[str, str], None]] = []
+
+
 def say(text: str) -> None:
     print(text, flush=True)
+    for listen in listeners:
+        listen("say", text)
 
 
 def status(text: str) -> None:
     """A line that rewrites itself on a terminal, and prints sparingly in logs."""
+    for listen in listeners:
+        listen("status", text)
     if sys.stdout.isatty():
         print("\r" + text.ljust(72), end="", flush=True)

@@ -18,7 +18,8 @@ from .track import Settings, analyse
 
 def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clips"),
         downloads: Path = Path("downloads"), max_height: int = 1080, force: bool = False,
-        detector: Detector | str = "auto", settings: Settings = Settings(), preset: str = "faster") -> dict:
+        detector: Detector | str = "auto", settings: Settings = Settings(), preset: str = "faster",
+        crf: int = 20, reframe: bool = True, title: str | None = None) -> dict:
     media.require_tools()
     if media.is_url(source):
         video, title = media.download(source, downloads, max_height, say)
@@ -26,7 +27,7 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
         video = Path(source).expanduser()
         if not video.is_file():
             raise ClipperError(f"Can't find the video file {source}")
-        title = video.stem
+        title = title or video.stem
     info = media.probe(video)
     segments = plan_segments(ends, start, info.duration, info.fps, info.frames)
 
@@ -40,13 +41,16 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
             old = {p["part"]: p for p in json.loads(manifest_file.read_text())["parts"]}
         except (ValueError, KeyError):
             old = {}
+    size = (media.OUT_W, media.OUT_H) if reframe else (info.width // 2 * 2, info.height // 2 * 2)
     manifest = {"title": title, "source": source, "video": str(video), "fps": info.fps,
-                "width": 1080, "height": 1920, "parts": []}
+                "width": size[0], "height": size[1], "parts": []}
 
     crop_w = min(info.width, round(info.height * 9 / 16 / 2) * 2)
     aw = min(640, info.width)
     ah = max(2, round(aw * info.height / info.width / 2) * 2)
     shape = "already vertical, fitting it" if info.vertical else f"cropping {crop_w}x{info.height} around faces"
+    if not reframe:
+        shape = "keeping the original shape"
     say(f"{title}\n  {info.width}x{info.height} {info.fps:.5g} fps, {format_time(info.duration)} long; "
         f"{len(segments)} clip(s); {shape}")
 
@@ -60,14 +64,16 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
                      "duration": round((b - a) / info.fps, 6), "frames": b - a, "file": file}
             label = f"[{n}/{len(segments)}] {file}  {entry['start']} -> {entry['end']}"
             previous = old.get(n, {})
-            same = all(previous.get(k) == entry[k] for k in ("start_seconds", "end_seconds", "file"))
+            entry["shape"] = "vertical" if reframe else "original"
+            same = all(previous.get(k) == entry[k] for k in ("start_seconds", "end_seconds", "file")) \
+                and previous.get("shape", "vertical") == entry["shape"]
             if (folder / file).exists() and same and not force:
                 say(f"{label}  already done, skipping")
                 manifest["parts"].append(previous)
                 continue
             began = time.time()
             crop_x = None
-            if not info.vertical:
+            if reframe and not info.vertical:
                 if isinstance(detector, str):
                     detector = make_detector(detector, say)
                 track = analyse(media.read_frames(video, a / info.fps, b - a, aw, ah), b - a, info.fps,
@@ -77,7 +83,7 @@ def run(source: str, ends: list, start: float = 0.0, out_root: Path = Path("clip
                 entry["shots"] = len(track.shots)
                 entry["face_seen"] = f"{track.faces_found}/{track.detections} checks"
             media.write_clip(video, folder / file, a / info.fps, b - a, info, crop_x, crop_w, work,
-                             lambda p: status(f"{label}  encoding {p:4.0%}"), preset)
+                             lambda p: status(f"{label}  encoding {p:4.0%}"), preset, crf, reframe)
             status("")
             extra = f"  {entry['shots']} shot(s), face in {entry['face_seen']}" if crop_x else ""
             say(f"{label}  done in {time.time() - began:.0f}s{extra}")
@@ -117,6 +123,9 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["watch"]:
         return watch_main(argv[1:])
+    if argv[:1] == ["web"]:
+        from .web import main as web_main
+        return web_main(argv[1:])
     parser = argparse.ArgumentParser(
         prog="clipper",
         description="Turn a long video into back-to-back vertical (9:16) clips that follow the main face.",

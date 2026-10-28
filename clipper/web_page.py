@@ -52,6 +52,7 @@ video{width:100%;border-radius:10px;background:#000;margin-top:12px;max-height:5
     <div class="bar" id="vbar"></div>
     <div id="vready" hidden>
       <button id="watch" style="margin-top:12px;width:100%">Watch preview to find the times</button>
+      <div class="small" id="nopreview" style="margin-top:10px">A small preview for finding the times is on its way. You can type the times now.</div>
       <video id="player" controls playsinline preload="none" hidden></video>
       <div class="marks" id="marks" hidden><button id="markstart">Start here</button><button id="markend">End here</button></div>
       <div class="row">
@@ -141,6 +142,7 @@ function renderCurrent(id) {
     bar.classList.toggle("done", all);
     bar.innerHTML = spans.map(([a, b]) => `<i style="left:${a / v.duration * 100}%;width:${(b - a) / v.duration * 100}%"></i>`).join("");
     $("#watch").hidden = !v.preview || !$("#player").hidden;
+    $("#nopreview").hidden = !!v.preview;
     if (shownFor !== id) {           // a new video: fresh inputs, start where the last clip ended
       shownFor = id;
       $("#player").hidden = $("#marks").hidden = true; $("#player").removeAttribute("src");
@@ -196,7 +198,7 @@ let timer;
 async function load() {
   clearTimeout(timer);
   try { const r = await fetch("/api/state"); state = await r.json(); render(); } catch (e) {}
-  const busy = [...Object.values(state.videos), ...Object.values(state.jobs)].some(x => !["ready", "done", "failed"].includes(x.status));
+  const busy = [...Object.values(state.videos), ...Object.values(state.jobs)].some(x => !["ready", "done", "failed"].includes(x.status) || (x.status === "ready" && x.preview === false));
   timer = setTimeout(load, busy ? 2000 : 15000);
 }
 load();

@@ -69,6 +69,7 @@ class Worker:
     def __init__(self, store: Store, detector="auto", preset: str = "faster"):
         self.store = store
         self.tasks: queue.Queue = queue.Queue()
+        self.previews: queue.Queue = queue.Queue()   # separate, so a preview never holds up a clip
         self.detector_name = detector if isinstance(detector, str) else "auto"
         self.detector = None if isinstance(detector, str) else detector
         self.preset = preset
@@ -79,11 +80,14 @@ class Worker:
             if v["status"] in ("waiting", "downloading", "preview"):
                 store.update("videos", vid, status="waiting", progress="")
                 self.tasks.put(("video", vid))
+            elif v["status"] == "ready" and not v.get("preview"):
+                self.previews.put(vid)
         for jid, j in sorted(store.state["jobs"].items(), key=lambda kv: kv[1]["created"]):
             if j["status"] in ("waiting", "working"):
                 store.update("jobs", jid, status="waiting", progress="")
                 self.tasks.put(("job", jid))
         threading.Thread(target=self.loop, daemon=True).start()
+        threading.Thread(target=self.preview_loop, daemon=True).start()
 
     def heard(self, kind: str, text: str) -> None:
         if self.current and text.strip():      # kept in memory only; the next real update saves it
@@ -122,21 +126,30 @@ class Worker:
         path, title = media.download(v["url"], store.library, MAX_HEIGHT, media.say,
                                      max_bytes=free - MIN_FREE_BYTES)
         info = media.probe(path)
-        store.update("videos", vid, status="preview", title=title, file=path.name, duration=info.duration,
-                     width=info.width, height=info.height, size=path.stat().st_size,
-                     progress="Making a small preview")
-        preview = store.previews / f"{vid}.mp4"
-        if not preview.exists():
-            part = preview.with_name(f"{vid}.partial.mp4")
-            done = subprocess.run(
-                ["ffmpeg", "-y", "-v", "error", "-i", str(path), "-vf", "scale=-2:360", "-c:v", "libx264",
-                 "-preset", "veryfast", "-crf", "32", "-c:a", "aac", "-b:a", "48k", "-ac", "1",
-                 "-movflags", "+faststart", str(part)], capture_output=True)
-            if done.returncode == 0:
-                part.replace(preview)
-            else:
-                part.unlink(missing_ok=True)
-        store.update("videos", vid, status="ready", progress="", preview=preview.exists())
+        # ready to clip straight away; the preview for finding times is made alongside
+        store.update("videos", vid, status="ready", title=title, file=path.name, duration=info.duration,
+                     width=info.width, height=info.height, size=path.stat().st_size, progress="", preview=False)
+        self.previews.put(vid)
+
+    def preview_loop(self) -> None:
+        while True:
+            vid = self.previews.get()
+            v = self.store.state["videos"].get(vid)
+            if not v or not v.get("file"):
+                continue
+            preview = self.store.previews / f"{vid}.mp4"
+            if not preview.exists():
+                part = preview.with_name(f"{vid}.partial.mp4")
+                done = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-threads", "2", "-i", str(self.store.library / v["file"]),
+                     "-vf", "scale=-2:360,fps=15", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "34",
+                     "-g", "30", "-c:a", "aac", "-b:a", "48k", "-ac", "1", "-movflags", "+faststart", str(part)],
+                    capture_output=True)
+                if done.returncode == 0:
+                    part.replace(preview)
+                else:
+                    part.unlink(missing_ok=True)
+            self.store.update("videos", vid, preview=preview.exists())
 
     def clip(self, jid: str) -> None:
         store = self.store

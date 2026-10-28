@@ -82,7 +82,12 @@ def test_no_password_the_page_just_opens(site):
 def test_paste_a_link_clip_part_by_part_and_download(site):
     browser, downloads, data = site
     vid, video = saved(browser)
-    assert video["title"] == "Box Story Ep1" and round(video["duration"]) == 10 and video["preview"]
+    assert video["title"] == "Box Story Ep1" and round(video["duration"]) == 10
+    # ready for times as soon as it's downloaded; the preview arrives on its own
+    end = time.time() + 60
+    while not browser.json("/api/state")[1]["videos"][vid]["preview"]:
+        assert time.time() < end, "the preview never arrived"
+        time.sleep(0.3)
     assert downloads == [("https://example.com/watch?v=1", web.MAX_HEIGHT)]
 
     # part 1: 0:00 to 0:04, part 2: from 4 to the end (end left empty)

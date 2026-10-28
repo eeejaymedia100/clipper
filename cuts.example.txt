@@ -1,0 +1,5 @@
+# One clip END time per line. Notes after the time are ignored.
+# Clip 1 runs from the start (or --start) to the first time, clip 2 to the second, and so on.
+4:12   hero meets the villain
+9:30   the fight
+end

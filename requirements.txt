@@ -1,0 +1,6 @@
+yt-dlp[default]>=2025.11.12
+numpy>=1.24
+opencv-python-headless>=4.8
+dghs-imgutils>=0.4
+onnxruntime>=1.16
+pytest>=7
